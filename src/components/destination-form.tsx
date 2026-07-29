@@ -3,9 +3,11 @@
 import {
   AirplaneTakeoffIcon,
   CalendarBlankIcon,
+  ClipboardIcon,
+  WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   DateField,
   DateTimeField,
@@ -14,10 +16,19 @@ import {
 import { AirportField, Field, MoneyField, Readout } from "@/components/fields";
 import { HotelDrafts } from "@/components/hotel-drafts";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { derive, legMinutes } from "@/lib/calc";
 import { formatDuration, formatHuf } from "@/lib/format";
 import { newId } from "@/lib/id";
+import { decodeDestination } from "@/lib/transfer";
 import { type Destination, emptyFlight, type Hotel } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -53,6 +64,7 @@ export function DestinationForm({
     () => editing ?? blankDestination(),
   );
   const [errors, setErrors] = useState<Errors>({});
+  const [pasteOpen, setPasteOpen] = useState(false);
   const placeRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -64,6 +76,21 @@ export function DestinationForm({
 
   function patch(update: Partial<Destination>) {
     setDraft((current) => ({ ...current, ...update }));
+  }
+
+  /**
+   * Fills the form from a pasted destination code. The row's own identity is
+   * kept, so pasting into an open destination edits that destination rather
+   * than quietly forking a second copy of it.
+   */
+  function applyPasted(pasted: Destination) {
+    setDraft((current) => ({
+      ...pasted,
+      id: current.id,
+      createdAt: current.createdAt,
+    }));
+    setErrors({});
+    placeRef.current?.focus();
   }
 
   function patchFlight(update: Partial<Destination["flight"]>) {
@@ -129,6 +156,9 @@ export function DestinationForm({
       className="flex flex-col"
       noValidate
       onKeyDown={(event) => {
+        // The paste dialog is portalled but still bubbles through the React
+        // tree, so its own Escape must not close the form underneath it.
+        if (pasteOpen) return;
         if (event.key === "Escape") {
           event.stopPropagation();
           onCancel();
@@ -146,15 +176,26 @@ export function DestinationForm({
             ? `${editing.place || "Úti cél"} szerkesztése`
             : "Új úti cél"}
         </h2>
-        <Button
-          aria-label="Űrlap bezárása"
-          onClick={onCancel}
-          size="icon-sm"
-          type="button"
-          variant="ghost"
-        >
-          <XIcon aria-hidden="true" />
-        </Button>
+        <div className="flex items-center gap-1.5">
+          <Button
+            onClick={() => setPasteOpen(true)}
+            size="sm"
+            type="button"
+            variant="outline"
+          >
+            <ClipboardIcon aria-hidden="true" data-icon="inline-start" />
+            Beillesztés kódból
+          </Button>
+          <Button
+            aria-label="Űrlap bezárása"
+            onClick={onCancel}
+            size="icon-sm"
+            type="button"
+            variant="ghost"
+          >
+            <XIcon aria-hidden="true" />
+          </Button>
+        </div>
       </div>
 
       <div className="flex flex-col gap-5 px-4 py-4">
@@ -351,7 +392,142 @@ export function DestinationForm({
         onCancel={onCancel}
         people={people}
       />
+
+      <PasteDestinationDialog
+        onApply={applyPasted}
+        onOpenChange={setPasteOpen}
+        open={pasteOpen}
+      />
     </form>
+  );
+}
+
+/**
+ * Takes a code copied from a destination row and hands back the destination it
+ * describes. The route out of a failed clipboard read is a plain textarea, so
+ * Ctrl+V always works even where the browser refuses the permission.
+ */
+function PasteDestinationDialog({
+  open,
+  onOpenChange,
+  onApply,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onApply: (destination: Destination) => void;
+}) {
+  const [text, setText] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const areaId = useId();
+
+  function reset() {
+    setText("");
+    setError(null);
+  }
+
+  function handleApply() {
+    const result = decodeDestination(text);
+    if (!result.ok) {
+      setError(result.reason);
+      return;
+    }
+    onApply(result.destination);
+    reset();
+    onOpenChange(false);
+  }
+
+  /** Reads the clipboard straight into the box, when the browser allows it. */
+  async function handlePaste() {
+    try {
+      const clip = await navigator.clipboard?.readText();
+      if (clip) {
+        setText(clip);
+        setError(null);
+        return;
+      }
+    } catch {
+      // Permission denied, or a non-secure context over plain HTTP.
+    }
+    setError("A böngésző nem engedte a beillesztést — használd a Ctrl+V-t.");
+  }
+
+  return (
+    <Dialog
+      onOpenChange={(next) => {
+        if (!next) reset();
+        onOpenChange(next);
+      }}
+      open={open}
+    >
+      <DialogContent className="sm:max-w-xl">
+        <DialogHeader>
+          <DialogTitle>Beillesztés kódból</DialogTitle>
+          <DialogDescription>
+            Illeszd be egy úti cél kódját — a dátumokat, a járatot, a
+            szállásokat és a jegyzetet is kitölti helyetted. A kódot az úti cél
+            sorában a másolás gombbal készítheted el. Az űrlap jelenlegi
+            tartalmát felülírja.
+          </DialogDescription>
+        </DialogHeader>
+
+        <label className="sr-only" htmlFor={areaId}>
+          Beillesztendő kód
+        </label>
+        <textarea
+          aria-describedby={error ? `${areaId}-error` : undefined}
+          aria-invalid={error ? true : undefined}
+          className={cn(
+            "numeric h-32 w-full resize-y border border-input bg-transparent px-2.5 py-2 text-[0.6875rem] break-all outline-none",
+            "placeholder:font-sans placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring/50 dark:bg-input/30",
+            error && "border-destructive",
+          )}
+          id={areaId}
+          onChange={(event) => {
+            setText(event.target.value);
+            if (error) setError(null);
+          }}
+          placeholder="Illeszd ide az úti cél kódját…"
+          spellCheck={false}
+          value={text}
+        />
+
+        {error ? (
+          <p
+            className="flex items-start gap-1.5 text-[0.6875rem] leading-tight text-destructive"
+            id={`${areaId}-error`}
+          >
+            <WarningCircleIcon
+              aria-hidden="true"
+              className="mt-px shrink-0"
+              weight="fill"
+            />
+            {error}
+          </p>
+        ) : null}
+
+        <DialogFooter>
+          <Button
+            className="mr-auto"
+            onClick={handlePaste}
+            type="button"
+            variant="outline"
+          >
+            <ClipboardIcon aria-hidden="true" data-icon="inline-start" />
+            Beillesztés
+          </Button>
+          <Button
+            onClick={() => onOpenChange(false)}
+            type="button"
+            variant="ghost"
+          >
+            Mégse
+          </Button>
+          <Button disabled={!text.trim()} onClick={handleApply} type="button">
+            Űrlap kitöltése
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

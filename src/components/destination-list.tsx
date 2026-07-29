@@ -10,6 +10,7 @@ import {
   TrashIcon,
 } from "@phosphor-icons/react";
 import { useState } from "react";
+import { CopyButton } from "@/components/copy-button";
 import { hotelNameOrHost } from "@/components/hotel-drafts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -22,6 +23,7 @@ import {
   formatTime,
   hostLabel,
 } from "@/lib/format";
+import { encodeDestination } from "@/lib/transfer";
 import type { Destination, Hotel } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -186,6 +188,17 @@ function DestinationRow({
         </div>
 
         <div className="col-start-2 row-start-1 flex items-center gap-0.5 md:col-start-3">
+          {/* Everything researched here — dates, flight, every saved hotel —
+              travels as one code, so the same place in another profile is a
+              paste rather than a re-typing. */}
+          <CopyButton
+            ariaLabel={`${destination.place || "Névtelen"} kimásolása a vágólapra`}
+            copiedAriaLabel={`${destination.place || "Névtelen"} kimásolva a vágólapra`}
+            failedHint="A böngésző nem engedte a másolást. Https-en vagy localhoston működik."
+            hint="Úti cél kimásolása — az űrlapba beillesztve kitölti a mezőket"
+            size="icon-sm"
+            text={() => encodeDestination(destination, people)}
+          />
           <Button
             aria-controls={panelId}
             aria-expanded={open}

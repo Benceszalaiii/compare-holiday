@@ -15,7 +15,11 @@ import {
   loadStore,
   saveStore,
 } from "@/lib/storage";
-import { type TransferProfile, uniqueProfileName } from "@/lib/transfer";
+import {
+  type TransferProfile,
+  uniqueProfileName,
+  withFreshDestinationIds,
+} from "@/lib/transfer";
 import type {
   Destination,
   Hotel,
@@ -230,22 +234,7 @@ function reducer(store: ProfileStore, action: Action): ProfileStore {
 function withFreshIds(trip: TripState): TripState {
   return {
     ...trip,
-    destinations: trip.destinations.map((destination) => {
-      const hotelIdMap = new Map(
-        destination.hotels.map((h) => [h.id, newId()]),
-      );
-      return {
-        ...destination,
-        id: newId(),
-        hotels: destination.hotels.map((h) => ({
-          ...h,
-          id: hotelIdMap.get(h.id) ?? newId(),
-        })),
-        chosenHotelId: destination.chosenHotelId
-          ? (hotelIdMap.get(destination.chosenHotelId) ?? null)
-          : null,
-      };
-    }),
+    destinations: trip.destinations.map(withFreshDestinationIds),
   };
 }
 

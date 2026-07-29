@@ -1,5 +1,6 @@
+import { newId } from "./id";
 import { normalizeTrip } from "./storage";
-import type { Profile, TripState } from "./types";
+import type { Destination, Profile, TripState } from "./types";
 import { DEFAULT_PROFILE_NAME } from "./types";
 
 /**
@@ -7,6 +8,13 @@ import { DEFAULT_PROFILE_NAME } from "./types";
  * truncated paste fails with an explanation instead of a stack trace.
  */
 const PREFIX = "NYARALAS1:";
+
+/**
+ * One destination on its own. A separate prefix from the profile code above,
+ * because the two are pasted into different boxes and telling someone "this is
+ * the other kind of code" beats letting a profile land in the form.
+ */
+const DESTINATION_PREFIX = "NYARALASCEL1:";
 
 export type TransferProfile = { name: string; trip: TripState };
 
@@ -64,14 +72,26 @@ export type DecodeResult =
   | { ok: true; profiles: TransferProfile[] }
   | { ok: false; reason: string };
 
+/** Sent when the code is ours but belongs in the other paste box. */
+const WRONG_BOX = {
+  profile:
+    "Ez egy profil kódja. A Profilok panel Betöltés gombjával tudod betölteni.",
+  destination:
+    "Ez egy úti cél kódja. Nyisd meg az űrlapot, és ott illeszd be a Beillesztés gombbal.",
+} as const;
+
+type Envelope =
+  | { ok: true; root: Record<string, unknown> }
+  | { ok: false; reason: string };
+
 /**
- * Reads a pasted transfer code.
+ * Unwraps a pasted code down to its parsed object.
  *
  * Accepts the compact prefixed form and also raw exported JSON, because people
  * paste whatever they have to hand. All whitespace is stripped first: a code
  * that has been wrapped across lines by an email client is still a valid code.
  */
-export function decodeTransfer(input: string): DecodeResult {
+function readEnvelope(input: string, prefix: string): Envelope {
   const trimmed = input.trim();
   if (!trimmed) return { ok: false, reason: "Illeszd be a kapott kódot." };
 
@@ -80,7 +100,18 @@ export function decodeTransfer(input: string): DecodeResult {
     json = trimmed;
   } else {
     const compact = trimmed.replace(/\s+/g, "");
-    if (!compact.startsWith(PREFIX)) {
+    if (!compact.startsWith(prefix)) {
+      // Being handed the other kind of code is the likeliest mistake, and the
+      // only one where the fix is a different button rather than a re-copy.
+      if (prefix !== PREFIX && compact.startsWith(PREFIX)) {
+        return { ok: false, reason: WRONG_BOX.profile };
+      }
+      if (
+        prefix !== DESTINATION_PREFIX &&
+        compact.startsWith(DESTINATION_PREFIX)
+      ) {
+        return { ok: false, reason: WRONG_BOX.destination };
+      }
       return {
         ok: false,
         reason:
@@ -88,7 +119,7 @@ export function decodeTransfer(input: string): DecodeResult {
       };
     }
     try {
-      json = fromBase64Url(compact.slice(PREFIX.length));
+      json = fromBase64Url(compact.slice(prefix.length));
     } catch {
       return {
         ok: false,
@@ -108,11 +139,22 @@ export function decodeTransfer(input: string): DecodeResult {
   if (typeof parsed !== "object" || parsed === null) {
     return { ok: false, reason: "A kód tartalma olvashatatlan." };
   }
-  const root = parsed as Record<string, unknown>;
+  return { ok: true, root: parsed as Record<string, unknown> };
+}
+
+/** Reads a pasted profile code. */
+export function decodeTransfer(input: string): DecodeResult {
+  const envelope = readEnvelope(input, PREFIX);
+  if (!envelope.ok) return envelope;
+
+  const root = envelope.root;
   if (root.kind !== "compare-holiday-transfer") {
     return {
       ok: false,
-      reason: "Ez a kód nem ehhez az alkalmazáshoz készült.",
+      reason:
+        root.kind === "compare-holiday-destination"
+          ? WRONG_BOX.destination
+          : "Ez a kód nem ehhez az alkalmazáshoz készült.",
     };
   }
 
@@ -137,6 +179,99 @@ export function decodeTransfer(input: string): DecodeResult {
     return { ok: false, reason: "A kód nem tartalmaz egyetlen profilt sem." };
   }
   return { ok: true, profiles };
+}
+
+/* --------------------------------------------------- a single destination */
+
+type DestinationPayload = {
+  kind: "compare-holiday-destination";
+  version: 1;
+  exportedAt: number;
+  /**
+   * The head count the figures were entered under. Nothing is recalculated
+   * from it — flight prices travel per person — but it lets the normaliser
+   * migrate a code produced from an older, group-total shape.
+   */
+  people: number;
+  destination: Destination;
+};
+
+/**
+ * Packs one destination — dates, flight, every saved hotel, notes — into a
+ * code, so a place that has already been researched can be handed to another
+ * profile or another person instead of typed in again.
+ */
+export function encodeDestination(
+  destination: Destination,
+  people: number,
+): string {
+  const payload: DestinationPayload = {
+    kind: "compare-holiday-destination",
+    version: 1,
+    exportedAt: Date.now(),
+    people,
+    destination,
+  };
+  return DESTINATION_PREFIX + toBase64Url(JSON.stringify(payload));
+}
+
+export type DecodeDestinationResult =
+  | { ok: true; destination: Destination }
+  | { ok: false; reason: string };
+
+/**
+ * Reads a pasted destination code. The result carries fresh ids, so filling
+ * the form from it can never reach back into the destination it came from —
+ * including when both live in the same browser.
+ */
+export function decodeDestination(input: string): DecodeDestinationResult {
+  const envelope = readEnvelope(input, DESTINATION_PREFIX);
+  if (!envelope.ok) return envelope;
+
+  const root = envelope.root;
+  if (root.kind !== "compare-holiday-destination") {
+    return {
+      ok: false,
+      reason:
+        root.kind === "compare-holiday-transfer"
+          ? WRONG_BOX.profile
+          : "Ez a kód nem ehhez az alkalmazáshoz készült.",
+    };
+  }
+
+  // Routed through the same normaliser as stored data by wrapping it in a
+  // one-destination trip, so a hand-edited or older code can't put an invalid
+  // shape into the form.
+  const trip = normalizeTrip({
+    version: 1,
+    people: typeof root.people === "number" ? root.people : 1,
+    destinations: [root.destination],
+  });
+  const destination = trip?.destinations[0];
+  if (!destination) {
+    return { ok: false, reason: "A kód nem tartalmaz úti célt." };
+  }
+  return { ok: true, destination: withFreshDestinationIds(destination) };
+}
+
+/**
+ * Re-keys a destination and its hotels. Used wherever a copy enters the store
+ * — a duplicated profile, an imported one, a pasted destination — so no two
+ * rows can ever share an id.
+ */
+export function withFreshDestinationIds(destination: Destination): Destination {
+  const hotelIds = new Map(destination.hotels.map((h) => [h.id, newId()]));
+  return {
+    ...destination,
+    id: newId(),
+    hotels: destination.hotels.map((h) => ({
+      ...h,
+      id: hotelIds.get(h.id) ?? newId(),
+    })),
+    chosenHotelId: destination.chosenHotelId
+      ? (hotelIds.get(destination.chosenHotelId) ?? null)
+      : null,
+  };
 }
 
 /* ----------------------------------------------------------------- names */
