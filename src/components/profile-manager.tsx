@@ -11,7 +11,7 @@ import {
   WarningCircleIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -34,6 +34,38 @@ import type { Profile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type Scope = "active" | "all";
+
+type CopyStatus = "idle" | "copied" | "failed";
+
+/**
+ * Runs a copy and holds the confirmation that follows it for a couple of
+ * seconds. The failure state matters as much as the success one: clipboard
+ * writes are refused outright on a non-secure origin, and a button that just
+ * did nothing would look broken.
+ */
+function useCopyFeedback(): {
+  status: CopyStatus;
+  copy: (text: string) => Promise<void>;
+} {
+  const [status, setStatus] = useState<CopyStatus>("idle");
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(
+    () => () => {
+      if (timer.current) clearTimeout(timer.current);
+    },
+    [],
+  );
+
+  const copy = useCallback(async (text: string) => {
+    const ok = await copyText(text);
+    setStatus(ok ? "copied" : "failed");
+    if (timer.current) clearTimeout(timer.current);
+    timer.current = setTimeout(() => setStatus("idle"), 2000);
+  }, []);
+
+  return { status, copy };
+}
 
 export function ProfileManager({
   profiles,
@@ -190,6 +222,7 @@ function ProfileRow({
   const [editing, setEditing] = useState(false);
   const [draftName, setDraftName] = useState(profile.name);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const { status: copyStatus, copy } = useCopyFeedback();
   const destinations = profile.trip.destinations.length;
 
   function commitRename() {
@@ -291,6 +324,44 @@ function ProfileRow({
           </Button>
         ) : null}
         <Button
+          // "Kimásol" is the clipboard; "Másolat" below is a second profile in
+          // this browser. Different actions, so they get different words.
+          aria-label={
+            copyStatus === "failed"
+              ? `${profile.name} kimásolása nem sikerült — használd a Kimentés ablakot`
+              : `${profile.name} kódjának kimásolása a vágólapra`
+          }
+          // A fixed width keeps the buttons beside it still while the label
+          // swaps between its three states.
+          className="min-w-24"
+          onClick={() =>
+            copy(encodeTransfer([{ name: profile.name, trip: profile.trip }]))
+          }
+          size="xs"
+          title={
+            copyStatus === "failed"
+              ? "A böngésző nem engedte a másolást — nyisd meg a Kimentés ablakot."
+              : undefined
+          }
+          type="button"
+          variant="ghost"
+        >
+          {copyStatus === "copied" ? (
+            <CheckIcon
+              aria-hidden="true"
+              data-icon="inline-start"
+              weight="bold"
+            />
+          ) : (
+            <CopyIcon aria-hidden="true" data-icon="inline-start" />
+          )}
+          {copyStatus === "copied"
+            ? "Kimásolva"
+            : copyStatus === "failed"
+              ? "Sikertelen"
+              : "Kimásol"}
+        </Button>
+        <Button
           aria-label={`${profile.name} másolása`}
           onClick={onDuplicate}
           size="xs"
@@ -352,22 +423,14 @@ function ExportDialog({
   onOpenChange: (open: boolean) => void;
 }) {
   const [scope, setScope] = useState<Scope>("active");
-  const [copied, setCopied] = useState(false);
+  const { status: copyStatus, copy } = useCopyFeedback();
   const areaId = useId();
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const selected =
     scope === "all"
       ? profiles
       : profiles.filter((p) => p.id === activeProfileId);
   const code = encodeTransfer(selected);
-
-  async function handleCopy() {
-    const ok = await copyText(code);
-    setCopied(ok);
-    if (copyTimer.current) clearTimeout(copyTimer.current);
-    copyTimer.current = setTimeout(() => setCopied(false), 2000);
-  }
 
   return (
     <Dialog onOpenChange={onOpenChange} open={open}>
@@ -418,8 +481,8 @@ function ExportDialog({
           >
             Bezár
           </Button>
-          <Button onClick={handleCopy} type="button">
-            {copied ? (
+          <Button onClick={() => copy(code)} type="button">
+            {copyStatus === "copied" ? (
               <CheckIcon
                 aria-hidden="true"
                 data-icon="inline-start"
@@ -428,7 +491,11 @@ function ExportDialog({
             ) : (
               <CopyIcon aria-hidden="true" data-icon="inline-start" />
             )}
-            {copied ? "Kimásolva" : "Másolás"}
+            {copyStatus === "copied"
+              ? "Kimásolva"
+              : copyStatus === "failed"
+                ? "Jelöld ki és Ctrl+C"
+                : "Másolás"}
           </Button>
         </DialogFooter>
       </DialogContent>
